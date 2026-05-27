@@ -17,9 +17,24 @@ export default async function handler(req, res) {
   });
   const page = await browser.newPage();
 
+  // Our master variable to store the link whenever it appears
   let snatchedDownloadLink = null;
 
-  // Anti-popup ad trap (just in case)
+  // --- 🕸️ THE GLOBAL NET: INSTALLED AT SECOND ONE ---
+  // This stays active the entire time. If the site auto-downloads at ANY point, we catch it.
+  await page.setRequestInterception(true);
+  page.on('request', (interceptedRequest) => {
+    const url = interceptedRequest.url();
+    
+    if (url.includes('worker') || url.includes('.mp4') || url.includes('.m4a') || url.includes('.mp3') || url.includes('download') || url.includes('stream')) {
+      snatchedDownloadLink = url;
+      interceptedRequest.abort(); // KILL THE FILE DOWNLOAD IMMEDIATELY!
+    } else {
+      interceptedRequest.continue();
+    }
+  });
+
+  // Anti-popup ad trap
   browser.on('targetcreated', async (target) => {
     if (target.type() === 'page') {
       const popupPage = await target.page();
@@ -28,7 +43,7 @@ export default async function handler(req, res) {
       if (url.includes('worker') || url.includes('.mp4') || url.includes('.m4a') || url.includes('.mp3')) {
         snatchedDownloadLink = url;
       }
-      await popupPage.close();
+      await popupPage.close(); // Crush the ad tab
     }
   });
 
@@ -47,7 +62,7 @@ export default async function handler(req, res) {
     // 4. Wait for the quality selection dropdown to appear
     await page.waitForSelector('.download-option', { timeout: 30000 });
 
-    // 5. Select your preferred quality option (e.g., "360p")
+    // 5. Select your preferred quality option
     const optionValue = await page.evaluate((requestedQuality) => {
       const selectElement = document.querySelector('.download-option');
       if (!selectElement) return null;
@@ -62,49 +77,42 @@ export default async function handler(req, res) {
       await page.select('.download-option', optionValue);
     }
 
-    // 6. Click the button to start the server-side video generation
+    // 6. Click the button to start server processing
     await page.waitForSelector('#downloadButton');
     await page.click('#downloadButton');
 
-    // 7. Wait up to 60 seconds for the processing wheel to stop
-    await page.waitForSelector('.download-container.btn-download', { timeout: 60000 });
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    // --- 🕸️ THE NET: INTERCEPT THE DYNAMIC DOWNLOAD STREAM ---
-    // We tell the browser to halt traffic so we can inspect it before it downloads
-    await page.setRequestInterception(true);
-    page.on('request', (interceptedRequest) => {
-      const url = interceptedRequest.url();
-      
-      // If the request URL looks like a media download worker or file extension, trap it!
-      if (url.includes('worker') || url.includes('.mp4') || url.includes('.m4a') || url.includes('.mp3') || url.includes('download') || url.includes('stream')) {
-        snatchedDownloadLink = url;
-        interceptedRequest.abort(); // STOP THE FILE DOWNLOAD FROM ACTUALLY HAPPENING!
-      } else {
-        interceptedRequest.continue(); // Let normal tiny image/script requests pass through
-      }
-    });
-
-    // Click the final download button to force out the file stream!
-    await page.click('.download-container.btn-download');
-
-    // 8. THE WAITING ROOM (Give our net up to 20 seconds to catch the aborted request)
+    // --- 🏎️ THE SMART WAITING LOOP ---
+    // We poll the page for up to 60 seconds. 
+    // If our global net already snatched an auto-download link, we break out instantly!
     let attempts = 0;
-    while (!snatchedDownloadLink && attempts < 20) {
+    while (!snatchedDownloadLink && attempts < 60) {
+      
+      // Check if that manual backup button has appeared on the screen yet
+      const manualButtonExists = await page.evaluate(() => {
+        return !!document.querySelector('.download-container.btn-download');
+      });
+
+      // If it showed up and we still don't have our link, smash it!
+      if (manualButtonExists && !snatchedDownloadLink) {
+        await page.click('.download-container.btn-download').catch(() => {});
+      }
+
+      // Rest for 1 second before checking again
       await new Promise(resolve => setTimeout(resolve, 1000));
       attempts++;
     }
 
     if (!snatchedDownloadLink) {
-      throw new Error("The download button was clicked, but we couldn't snatch the underlying download stream link.");
+      throw new Error("Could not capture the download stream link before timeout.");
     }
 
-    // 9. Send the clean link back to your Google Sheet popup window
+    // 7. Success! Send the clean link back to your Google Sheet popup window
     return res.status(200).json({ success: true, downloadLink: snatchedDownloadLink });
 
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   } finally {
+    // Keep your session clean and free
     await browser.close();
     await client.sessions.release(session.id);
   }
