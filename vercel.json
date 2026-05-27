@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/automate.js": {
+      "maxDuration": 60
+    }
+  }
+}
