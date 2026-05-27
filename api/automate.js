@@ -19,20 +19,15 @@ export default async function handler(req, res) {
 
   let snatchedDownloadLink = null;
 
-  // --- ANTIVIRUS / ANTI-POPUP AD TRAP ---
+  // Anti-popup ad trap (just in case)
   browser.on('targetcreated', async (target) => {
     if (target.type() === 'page') {
       const popupPage = await target.page();
       if (!popupPage) return;
-
       const url = popupPage.url();
-      
-      // If a popup opens with a file distribution URL, grab it!
-      if (url.includes('worker') || url.includes('.mp4') || url.includes('.m4a') || url.includes('.mp3') || url.includes('download') || url.includes('stream')) {
+      if (url.includes('worker') || url.includes('.mp4') || url.includes('.m4a') || url.includes('.mp3')) {
         snatchedDownloadLink = url;
       }
-      
-      // Smash the popup immediately so it doesn't waste resources or memory
       await popupPage.close();
     }
   });
@@ -45,7 +40,7 @@ export default async function handler(req, res) {
     await page.waitForSelector('#postUrl');
     await page.type('#postUrl', youtubeUrl);
 
-    // 3. Click the initial convert button (specifically targeting the <button> tag)
+    // 3. Click the initial convert button
     await page.waitForSelector('button.btn-download');
     await page.click('button.btn-download');
 
@@ -71,35 +66,37 @@ export default async function handler(req, res) {
     await page.waitForSelector('#downloadButton');
     await page.click('#downloadButton');
 
-    // 7. THE FIX: Wait up to 60 seconds for the processing wheel to stop 
-    // and for your new confirmation download div to appear!
+    // 7. Wait up to 60 seconds for the processing wheel to stop
     await page.waitForSelector('.download-container.btn-download', { timeout: 60000 });
-    
-    // Give the page 2 seconds of breathing room to wire up its click functions
     await new Promise(resolve => setTimeout(resolve, 2000));
 
-    // Click the final download button to force out the file link!
+    // --- 🕸️ THE NET: INTERCEPT THE DYNAMIC DOWNLOAD STREAM ---
+    // We tell the browser to halt traffic so we can inspect it before it downloads
+    await page.setRequestInterception(true);
+    page.on('request', (interceptedRequest) => {
+      const url = interceptedRequest.url();
+      
+      // If the request URL looks like a media download worker or file extension, trap it!
+      if (url.includes('worker') || url.includes('.mp4') || url.includes('.m4a') || url.includes('.mp3') || url.includes('download') || url.includes('stream')) {
+        snatchedDownloadLink = url;
+        interceptedRequest.abort(); // STOP THE FILE DOWNLOAD FROM ACTUALLY HAPPENING!
+      } else {
+        interceptedRequest.continue(); // Let normal tiny image/script requests pass through
+      }
+    });
+
+    // Click the final download button to force out the file stream!
     await page.click('.download-container.btn-download');
 
-    // 8. THE WAITING ROOM (Snares the link from either the popup or an updated href link)
+    // 8. THE WAITING ROOM (Give our net up to 20 seconds to catch the aborted request)
     let attempts = 0;
-    while (!snatchedDownloadLink && attempts < 30) {
-      const currentHref = await page.evaluate(() => {
-        const anchor = document.querySelector('#downloadButton');
-        return anchor ? anchor.href : '';
-      });
-
-      if (currentHref && currentHref.startsWith('http') && !currentHref.includes('javascript')) {
-        snatchedDownloadLink = currentHref;
-        break;
-      }
-
+    while (!snatchedDownloadLink && attempts < 20) {
       await new Promise(resolve => setTimeout(resolve, 1000));
       attempts++;
     }
 
     if (!snatchedDownloadLink) {
-      throw new Error("Timed out waiting for the website to hand over the final file link.");
+      throw new Error("The download button was clicked, but we couldn't snatch the underlying download stream link.");
     }
 
     // 9. Send the clean link back to your Google Sheet popup window
