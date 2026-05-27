@@ -17,11 +17,9 @@ export default async function handler(req, res) {
   });
   const page = await browser.newPage();
 
-  // Create a placeholder variable to hold our prize link
   let snatchedDownloadLink = null;
 
   // --- ANTIVIRUS / ANTI-POPUP AD TRAP ---
-  // This watches every single new tab or popup that tries to open
   browser.on('targetcreated', async (target) => {
     if (target.type() === 'page') {
       const popupPage = await target.page();
@@ -29,12 +27,12 @@ export default async function handler(req, res) {
 
       const url = popupPage.url();
       
-      // If the popup URL contains file keywords, it's not an ad—it's our download link!
-      if (url.includes('worker') || url.includes('.mp4') || url.includes('.m4a') || url.includes('.mp3') || url.includes('download')) {
+      // If a popup opens with a file distribution URL, grab it!
+      if (url.includes('worker') || url.includes('.mp4') || url.includes('.m4a') || url.includes('.mp3') || url.includes('download') || url.includes('stream')) {
         snatchedDownloadLink = url;
       }
       
-      // CLOSE IT IMMEDIATELY. This kills ads AND stops the cloud from downloading files.
+      // Smash the popup immediately so it doesn't waste resources or memory
       await popupPage.close();
     }
   });
@@ -47,14 +45,14 @@ export default async function handler(req, res) {
     await page.waitForSelector('#postUrl');
     await page.type('#postUrl', youtubeUrl);
 
-    // 3. Click the initial convert button
-    await page.waitForSelector('.btn-download');
-    await page.click('.btn-download');
+    // 3. Click the initial convert button (specifically targeting the <button> tag)
+    await page.waitForSelector('button.btn-download');
+    await page.click('button.btn-download');
 
     // 4. Wait for the quality selection dropdown to appear
     await page.waitForSelector('.download-option', { timeout: 30000 });
 
-    // 5. Code logic to find and select your preferred quality option (e.g., "360p")
+    // 5. Select your preferred quality option (e.g., "360p")
     const optionValue = await page.evaluate((requestedQuality) => {
       const selectElement = document.querySelector('.download-option');
       if (!selectElement) return null;
@@ -69,41 +67,47 @@ export default async function handler(req, res) {
       await page.select('.download-option', optionValue);
     }
 
-    // 6. CLICK THE FINAL DOWNLOAD BUTTON
+    // 6. Click the button to start the server-side video generation
     await page.waitForSelector('#downloadButton');
     await page.click('#downloadButton');
 
-    // 7. THE WAITING ROOM (Snares the link during processing)
-    // We poll the page and browser for up to 40 seconds waiting for the link to pop up
+    // 7. THE FIX: Wait up to 60 seconds for the processing wheel to stop 
+    // and for your new confirmation download div to appear!
+    await page.waitForSelector('.download-container.btn-download', { timeout: 60000 });
+    
+    // Give the page 2 seconds of breathing room to wire up its click functions
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Click the final download button to force out the file link!
+    await page.click('.download-container.btn-download');
+
+    // 8. THE WAITING ROOM (Snares the link from either the popup or an updated href link)
     let attempts = 0;
-    while (!snatchedDownloadLink && attempts < 40) {
-      // Check if the button's own link changed from "javascript:void(0)" to a real download URL
+    while (!snatchedDownloadLink && attempts < 30) {
       const currentHref = await page.evaluate(() => {
-        const btn = document.querySelector('#downloadButton');
-        return btn ? btn.href : '';
+        const anchor = document.querySelector('#downloadButton');
+        return anchor ? anchor.href : '';
       });
 
-      if (currentHref && currentHref.startsWith('http')) {
+      if (currentHref && currentHref.startsWith('http') && !currentHref.includes('javascript')) {
         snatchedDownloadLink = currentHref;
         break;
       }
 
-      // Pause for 1 second before checking again
       await new Promise(resolve => setTimeout(resolve, 1000));
       attempts++;
     }
 
     if (!snatchedDownloadLink) {
-      throw new Error("Timed out waiting for the website to finish processing the video link.");
+      throw new Error("Timed out waiting for the website to hand over the final file link.");
     }
 
-    // 8. VICTORY! Send the raw download link back to Google Sheets
+    // 9. Send the clean link back to your Google Sheet popup window
     return res.status(200).json({ success: true, downloadLink: snatchedDownloadLink });
 
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   } finally {
-    // Make sure everything closes securely so you never pay money
     await browser.close();
     await client.sessions.release(session.id);
   }
