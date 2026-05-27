@@ -1,0 +1,9 @@
+{
+  "name": "free-steel-automation",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "steel-sdk": "^0.1.0",
+    "puppeteer-core": "^22.0.0"
+  }
+}
