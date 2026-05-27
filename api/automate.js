@@ -13,11 +13,18 @@ export default async function handler(req, res) {
   });
   const page = await browser.newPage();
 
-  // 1. NAVIGATION FIREWALL (The "No Google Popup" zone)
+  // 1. BLOCK POPUPS & ADS
   await page.setRequestInterception(true);
   page.on('request', (req) => {
-    if (req.url().includes('google.com') || req.url().includes('ads')) {
+    const url = req.url();
+    // Block common ad/popup domains
+    if (url.includes('google.com') || url.includes('doubleclick') || url.includes('ads')) {
       req.abort();
+    } 
+    // INTERCEPT THE DOWNLOAD LINK
+    else if (url.includes('dl.iamworker.com') || url.includes('.mp4') || url.includes('.m4a')) {
+      snatchedDownloadLink = url;
+      req.abort(); // STOP THE DOWNLOAD, KEEP THE LINK
     } else {
       req.continue();
     }
@@ -25,16 +32,12 @@ export default async function handler(req, res) {
 
   let snatchedDownloadLink = null;
 
-  // 2. RESPONSE LISTENER (Catch the actual file link)
-  page.on('response', async (response) => {
-    const url = response.url();
-    if (url.includes('dl.iamworker.com') || url.includes('.mp4') || url.includes('.m4a')) {
-      snatchedDownloadLink = url;
-    }
-  });
-
   try {
     await page.goto(targetUrl, { waitUntil: 'networkidle2' });
+    
+    // 2. Clear any unexpected Dialogs
+    page.on('dialog', async (dialog) => { await dialog.dismiss(); });
+
     await page.type('#postUrl', youtubeUrl);
     await page.click('button.btn-download');
 
@@ -50,17 +53,17 @@ export default async function handler(req, res) {
     await page.select('.download-option', optionValue);
     await page.click('#downloadButton');
     
-    // Wait for the button
+    // Wait for final click
     await page.waitForSelector('.download-container.btn-download', { timeout: 60000 });
     await page.click('.download-container.btn-download');
 
-    // Wait for snatch
+    // Wait for the snatch
     for(let i = 0; i < 20; i++) {
       if (snatchedDownloadLink) break;
       await new Promise(r => setTimeout(r, 1000));
     }
 
-    if (!snatchedDownloadLink) throw new Error("Link never appeared.");
+    if (!snatchedDownloadLink) throw new Error("Link not caught by interceptor.");
 
     return res.status(200).json({ success: true, downloadLink: snatchedDownloadLink });
 
